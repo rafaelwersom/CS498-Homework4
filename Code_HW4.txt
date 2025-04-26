@@ -25,6 +25,7 @@ schema = StructType([
 ])
 
 df = spark.createDataFrame(results, schema=schema)
+df = df.repartition(10)
 df.write.mode('overwrite').json('processed_data')
 spark.stop()
 
