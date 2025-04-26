@@ -1,1 +1,101 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+import csv
 
+spark = SparkSession.builder.appName('SearchLogPreprocessing').getOrCreate()
+
+log_file_path = 'searchLog.csv'
+results=[]
+
+with open(log_file_path, 'r') as file:
+    for line in file:
+        term_part, urls_part = line.split(',', 1)
+        term = term_part.split(':', 1)[1].strip(" ‘’\'\"")
+        url_clicks = urls_part.strip().split('~')
+
+        for pair in url_clicks:
+            if ':' in pair:
+                url, clicks = pair.strip().split(':')
+                results.append([term, url.strip(),int(clicks.strip())])
+
+schema = StructType([
+    StructField('term', StringType(), True),
+    StructField('url', StringType(), True),
+    StructField('clicks', IntegerType(), True)
+])
+
+df = spark.createDataFrame(results, schema=schema)
+df.write.mode('overwrite').json('processed_data')
+spark.stop()
+
+----------------------------------------------------------------------------------------------------------
+
+from flask import Flask, request, jsonify
+import json
+import glob
+
+app = Flask(__name__)
+
+data = []
+for filename in glob.glob('processed_data/part-*.json'):
+    with open(filename, 'r') as f:
+        for line in f:
+            data.append(json.loads(line))
+
+@app.route('/results', methods=['GET'])
+def get_results():
+    req_data = request.get_json()
+    search_term = req_data.get("term", "").strip()
+
+    filtered = [row for row in data if row["term"].lower() == search_term.lower()]
+
+    sorted_results = sorted(filtered,
+        key=lambda x: (
+            -x["clicks"],
+            1 if x["url"].endswith(".org") else
+            2 if x["url"].endswith(".edu") else
+            3 if x["url"].endswith(".com") else
+            4
+        )
+    )
+
+    return jsonify({"results": {row["url"]: row["clicks"] for row in sorted_results}})
+
+@app.route('/trends', methods=['GET'])
+def get_trends():
+    req_data = request.get_json()
+    search_term = req_data.get("term", "").strip()
+
+    filtered = [row for row in data if row["term"].lower() == search_term.lower()]
+
+    return jsonify({"clicks": sum(row["clicks"] for row in filtered)})
+
+@app.route('/popularity', methods=['GET'])
+def get_popularity():
+    req_data = request.get_json()
+    url = req_data.get("url", "").strip()
+
+    filtered = [row for row in data if row["url"].lower() == url.lower()]
+
+    return jsonify({"clicks": sum(row["clicks"] for row in filtered)})
+
+@app.route('/getBestTerms', methods=['GET'])
+def get_best_terms():
+    req_data = request.get_json()
+    url = req_data.get("website", "").strip()
+
+    url_rows = [row for row in data if row["url"].lower() == url.lower()]
+    total_clicks = sum(row["clicks"] for row in url_rows)
+
+    if total_clicks == 0:
+        return jsonify({"best_terms": []})
+
+    best_terms = []
+    for row in url_rows:
+        if (row["clicks"] / total_clicks) > 0.05:
+            best_terms.append(row["term"])
+
+    return jsonify({"best_terms": best_terms})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', debug=True)
